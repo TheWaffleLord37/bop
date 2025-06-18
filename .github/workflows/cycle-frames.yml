@@ -1,1 +1,94 @@
+name: Cycle bop.png through frames
 
+on:
+  workflow_dispatch:         # Allows manual trigger from Actions tab
+
+jobs:
+  update-frame:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+
+      # Enforce 6-hour rate limit (21600)
+      - name: Rate limit check
+        id: ratelimit
+        run: |
+          NOW=$(date +%s)
+          LAST=$(cat .last_run 2>/dev/null || echo 0)
+          GAP=$(( NOW - LAST ))
+          if [ $GAP -lt 21600 ]; then
+            echo "Run blocked due to rate limit ($GAP seconds since last run)"
+            echo "ratelimited=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ratelimited=false" >> "$GITHUB_OUTPUT"
+            echo $NOW > .last_run
+          fi
+
+      # Read current index from the pointer file
+      - name: Read current index
+        if: steps.ratelimit.outputs.ratelimited == 'false'
+        id: idx
+        run: |
+          INDEX=$(cat frame_index.txt)
+          echo "index=$INDEX" >> "$GITHUB_OUTPUT"
+
+      # Copy the corresponding frame over bop.png
+      - name: Replace bop.png with selected frame
+        if: steps.ratelimit.outputs.ratelimited == 'false'
+        run: |
+          cp "frames/${{ steps.idx.outputs.index }}.png" bop.png
+
+      # Calculate and write the next index (wrap 8 → 1)
+      - name: Bump pointer
+        if: steps.ratelimit.outputs.ratelimited == 'false'
+        id: bump
+        run: |
+          CUR=${{ steps.idx.outputs.index }}
+          NEXT=$(( CUR == 8 ? 1 : CUR + 1 ))
+          echo "cur=$CUR" >> "$GITHUB_OUTPUT"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          echo $NEXT > frame_index.txt
+
+      # Commit only if something actually changed
+      - name: Commit & push if updated
+        if: steps.ratelimit.outputs.ratelimited == 'false'
+        run: |
+          git config --global user.name  "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add bop.png frame_index.txt .last_run
+          git diff --cached --quiet && echo "No changes" || \
+            (git commit -m "Auto-update to frame ${{ steps.bump.outputs.cur }}" && git push)
+
+      # 5-minute delay before notifications (300)
+      - name: Wait 5 minutes
+        if: steps.ratelimit.outputs.ratelimited == 'false'
+        run: sleep 300
+
+      # Discord message for rollover (8 → 1)
+      - name: Notify Discord (rollover)
+        if: ${{ success() && steps.ratelimit.outputs.ratelimited == 'false' && steps.bump.outputs.cur == '1' }}
+        run: |
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d "{\"content\": \"## bop template updated to frame 1\\n(animation restarted, there are no differences between this frame and the last frame)\"}" \
+               ${{ secrets.DISCORD_WEBHOOK }}
+
+      # Discord message for frame 4 → 5 transition
+      - name: Notify Discord (frame 4 to 5)
+        if: ${{ success() && steps.ratelimit.outputs.ratelimited == 'false' && steps.bump.outputs.cur == '5'}}
+        run: |
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d "{\"content\": \"## bop template updated to frame 5\\n(there are no differences between this frame and the last frame)\"}" \
+               ${{ secrets.DISCORD_WEBHOOK }}
+
+      # Discord message for normal frame update
+      - name: Notify Discord (normal)
+        if: ${{ success() && steps.ratelimit.outputs.ratelimited == 'false' && !(steps.bump.outputs.cur == '1') && !(steps.bump.outputs.cur == '5') }}
+        run: |
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d "{\"content\": \"<@&471425221405048843>\\n## bop template updated to frame **${{ steps.bump.outputs.cur }}**\\nRefresh your template or reopen it with the link below!\\n# [Template](<https://pxls.space/#x=1093&y=813&scale=15&template=https%3A%2F%2Fraw.githubusercontent.com%2FTheWaffleLord37%2Fbop%2Frefs%2Fheads%2Fmain%2Fbop.png&ox=1067&oy=787&tw=52&title=bop&convert=nearestCustom>)\"}" \
+               ${{ secrets.DISCORD_WEBHOOK }}
